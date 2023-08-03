@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 #include <assert.h>
 #include <math.h>
 #include "lib/stb/stb_truetype.h"
+#include "lib/stb/stb_image.h"
 #include "renderer.h"
 
 #define MAX_GLYPHSET 256
@@ -23,6 +25,7 @@ struct RenFont {
   GlyphSet *sets[MAX_GLYPHSET];
   float size;
   int height;
+  bool is_bitmap;
 };
 
 
@@ -105,7 +108,7 @@ void ren_free_image(RenImage *image) {
 }
 
 
-static GlyphSet* load_glyphset(RenFont *font, int idx) {
+static GlyphSet* load_glyphset_ttf(RenFont *font, int idx) {
   GlyphSet *set = check_alloc(calloc(1, sizeof(GlyphSet)));
 
   /* init image */
@@ -150,6 +153,65 @@ retry:
 }
 
 
+static GlyphSet* load_glyphset_bitmap(RenFont *font, int idx) {
+  int width, height, componentCount;
+  unsigned char *image = stbi_load(font->data,
+      &width, &height, &componentCount, STBI_rgb_alpha);
+  assert(image);
+  font->height = height;
+
+  int font_width = 0;
+  int font_width_padded = 0;
+
+  uint32_t *image32 = (uint32_t*)image;
+  for (int i = 0; i < width; i++) {
+    if (image32[i] != 0) {
+      font_width = i;
+      break;
+    }
+  }
+
+  for (int i = font_width; i < width; i++) {
+    if (image32[i] == 0) {
+      font_width_padded = i;
+      break;
+    }
+  }
+
+  GlyphSet *set = check_alloc(calloc(1, sizeof(GlyphSet)));
+  set->image = ren_new_image(width, height);
+
+  const int font_start_codepoint = 32;
+  int font_char_count = width / font_width_padded;
+  for (int i = 0; i < font_char_count + font_start_codepoint; i++) {
+    if (i > font_start_codepoint) {
+      int image_i = i - font_start_codepoint;
+      int char_start_x = image_i * font_width_padded;
+      set->glyphs[i].x0 = char_start_x;
+      set->glyphs[i].x1 = char_start_x + font_width;
+      set->glyphs[i].y1 = font->height;
+    }
+
+    set->glyphs[i].xadvance = font_width;
+  }
+
+  for (int i = width * height - 1; i >= 0; i--) {
+    uint8_t n = image[i * 4 + 3];
+    set->image->pixels[i] = (RenColor) { .r = 255, .g = 255, .b = 255, .a = n };
+  }
+
+  stbi_image_free(image);
+
+  return set;
+}
+
+
+static GlyphSet* load_glyphset(RenFont *font, int idx) {
+  return font->is_bitmap ?
+    load_glyphset_bitmap(font, idx) : load_glyphset_ttf(font, idx);
+}
+
+
 static GlyphSet* get_glyphset(RenFont *font, int codepoint) {
   int idx = (codepoint >> 8) % MAX_GLYPHSET;
   if (!font->sets[idx]) {
@@ -159,12 +221,13 @@ static GlyphSet* get_glyphset(RenFont *font, int codepoint) {
 }
 
 
-RenFont* ren_load_font(const char *filename, float size) {
+RenFont* ren_load_font_ttf(const char *filename, float size) {
   RenFont *font = NULL;
   FILE *fp = NULL;
 
   /* init font */
   font = check_alloc(calloc(1, sizeof(RenFont)));
+  font->is_bitmap = false;
   font->size = size;
 
   /* load font into buffer */
@@ -200,6 +263,35 @@ fail:
   if (font) { free(font->data); }
   free(font);
   return NULL;
+}
+
+
+RenFont* ren_load_font_bitmap(const char *filename, float size) {
+  RenFont *font = check_alloc(calloc(1, sizeof(RenFont)));
+  font->is_bitmap = true;
+  font->size = size;
+  size_t filename_len = strlen(filename);
+  font->data = check_alloc(malloc(filename_len * sizeof(char)));
+  strncpy(font->data, filename, filename_len);
+
+  return font;
+}
+
+
+RenFont* ren_load_font(const char *filename, float size) {
+  char *dot = strrchr(filename, '.');
+  char *extension;
+  if (!dot || dot == filename) {
+    extension = "";
+  } else {
+    extension = dot + 1;
+  }
+
+  if (strcmp(extension, "png") == 0) {
+    return ren_load_font_bitmap(filename, size);
+  }
+
+  return ren_load_font_ttf(filename, size);
 }
 
 
